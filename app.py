@@ -17,18 +17,25 @@ st.write("ConvVAE reconstruction paired with Hyperdimensional Computing (HDC) bi
 # =============================================================
 # CONFIGURATION & CONSTANTS
 # =============================================================
-IMG_SIZE = 160
+IMG_SIZE   = 160
 LATENT_DIM = 64
-HV_DIM = 10000
-THRESHOLD = 0.53
+HV_DIM     = 10000
+GRID_SIZE  = 16
+PATCH_FEAT = 4
+THRESHOLD  = 0.597  # Recalibrated threshold range [0.35 - 0.50]
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR     = os.path.dirname(os.path.abspath(__file__))
 ENCODER_PATH = os.path.join(BASE_DIR, "encoder.weights.h5")
 DECODER_PATH = os.path.join(BASE_DIR, "decoder.weights.h5")
-PROTO_PATH = os.path.join(BASE_DIR, "proto_normal.npy")
+PROTO_PATH   = os.path.join(BASE_DIR, "proto_normal.npy")
 
 ENCODER_URL = "https://github.com/gitankush123/aml-detection/releases/download/v1.0.0/encoder.weights.h5"
 DECODER_URL = "https://github.com/gitankush123/aml-detection/releases/download/v1.0.0/decoder.weights.h5"
+
+# Fixed random state for projection matrices
+np.random.seed(42)
+RP_latent  = np.random.randn(LATENT_DIM, HV_DIM).astype(np.float32)
+RP_heatmap = np.random.randn(PATCH_FEAT, HV_DIM).astype(np.float32)
 
 # =============================================================
 # 1. WEIGHT DOWNLOADER
@@ -87,43 +94,84 @@ def load_full_pipeline():
 
 encoder, decoder, proto_normal = load_full_pipeline()
 
-# HDC Projection
-np.random.seed(42)
-proj_matrix = np.random.randn(LATENT_DIM, HV_DIM)
+# =============================================================
+# 3. HDC PIPELINE UTILITIES
+# =============================================================
+def binarize_hv(proj):
+    """Maps projection arrays strictly to {-1.0, 1.0}."""
+    hv = np.sign(proj).astype(np.float32)
+    hv[hv == 0] = 1.0
+    return hv
 
-def encode_hdc(z_vector):
-    projected = np.dot(z_vector, proj_matrix)
-    return np.sign(projected)
+def encode_to_hv(vec, RP):
+    norm = np.linalg.norm(vec) + 1e-8
+    vec_norm = vec / norm
+    proj = vec_norm @ RP
+    return binarize_hv(proj)
+
+def extract_latent_hv(z_vec):
+    return encode_to_hv(z_vec, RP_latent)
+
+def extract_heatmap_hv(img_array, recon_img):
+    error   = (img_array - recon_img) ** 2
+    heatmap = np.sqrt(np.max(error, axis=-1))
+
+    H, W = heatmap.shape
+    ph, pw = H // GRID_SIZE, W // GRID_SIZE
+    hv_accum = np.zeros(HV_DIM, dtype=np.float32)
+
+    for r in range(GRID_SIZE):
+        for c in range(GRID_SIZE):
+            patch = heatmap[r*ph:(r+1)*ph, c*pw:(c+1)*pw]
+            feat  = np.array([
+                np.mean(patch),
+                np.max(patch),
+                np.std(patch),
+                np.percentile(patch, 90)
+            ], dtype=np.float32)
+
+            hv_accum += encode_to_hv(feat, RP_heatmap)
+
+    return binarize_hv(hv_accum)
+
+def fuse_hvs(hv1, hv2):
+    """HDC Vector Symbolic Binding via Element-wise Multiplication."""
+    return hv1 * hv2
 
 def cosine_similarity(hv1, hv2):
-    return float(np.dot(hv1, hv2) / (np.linalg.norm(hv1) * np.linalg.norm(hv2) + 1e-8))
+    dot_prod = np.dot(hv1, hv2)
+    norms = (np.linalg.norm(hv1) * np.linalg.norm(hv2)) + 1e-8
+    return float(dot_prod / norms)
 
 # =============================================================
-# 3. STREAMLIT USER INTERFACE
+# 4. STREAMLIT USER INTERFACE
 # =============================================================
 uploaded_file = st.file_uploader("Upload Blood Cell Image", type=["jpg", "png", "jpeg", "tiff"])
 
 if uploaded_file is not None:
-    # Load and Preprocess Image
-    img = Image.open(uploaded_file).convert("RGB")
-    img_resized = img.resize((IMG_SIZE, IMG_SIZE))
+    # 1. Robust Image Preprocessing
+    raw_img = Image.open(uploaded_file).convert("RGB")
+    img_resized = raw_img.resize((IMG_SIZE, IMG_SIZE))
     img_array = np.array(img_resized, dtype=np.float32) / 255.0
     img_batch = np.expand_dims(img_array, axis=0)
 
-    # 1. ConvVAE Pass
+    # 2. VAE Reconstruction Pass
     z_mean, _, _ = encoder.predict(img_batch, verbose=0)
-    recon_img = decoder.predict(z_mean, verbose=0)[0]
+    recon_img    = decoder.predict(z_mean, verbose=0)[0]
 
-    # 2. HDC Anomaly Scoring
-    hv_sample = encode_hdc(z_mean[0])
-    sim = cosine_similarity(hv_sample, proto_normal)
+    # 3. Dual-Modal HDC Extraction & Fusion
+    hv_lat  = extract_latent_hv(z_mean[0])
+    hv_hm   = extract_heatmap_hv(img_array, recon_img)
+    hv_fused = fuse_hvs(hv_lat, hv_hm)
+
+    # 4. Anomaly Decision Logic
+    sim = cosine_similarity(hv_fused, proto_normal)
     anomaly_score = 1.0 - sim
-
     is_aml = anomaly_score > THRESHOLD
 
-    # Generate Visualizations
+    # 5. Visualizations
     diff = np.abs(img_array - recon_img)
-    heatmap = np.mean(diff, axis=-1)
+    heatmap_viz = np.mean(diff, axis=-1)
 
     fig, ax = plt.subplots(1, 3, figsize=(10, 3))
     ax[0].imshow(img_array)
@@ -134,18 +182,18 @@ if uploaded_file is not None:
     ax[1].set_title("Reconstruction")
     ax[1].axis("off")
 
-    ax[2].imshow(heatmap, cmap="jet")
+    ax[2].imshow(heatmap_viz, cmap="jet")
     ax[2].set_title(f"XAI Map (Score: {anomaly_score:.3f})")
     ax[2].axis("off")
 
     plt.tight_layout()
     st.pyplot(fig)
 
-    # Display Results
+    # 6. Diagnosis Outputs
     if is_aml:
-        st.error(f"### Diagnosis: AML DETECTED")
+        st.error("### Diagnosis: AML DETECTED")
     else:
-        st.success(f"### Diagnosis: NORMAL")
+        st.success("### Diagnosis: NORMAL")
 
     st.markdown(f"""
     * **Anomaly Score:** `{anomaly_score:.4f}`
