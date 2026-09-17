@@ -1,4 +1,22 @@
 import os
+import urllib.request
+
+ENCODER_URL = "https://github.com/gitankush123/aml-detection/releases/download/v1.0.0/encoder.weights.h5"
+DECODER_URL = "https://github.com/gitankush123/aml-detection/releases/download/v1.0.0/decoder.weights.h5"
+
+def download_weights_if_missing():
+    if not os.path.exists("encoder.weights.h5"):
+        print("Downloading encoder weights...")
+        urllib.request.urlretrieve(ENCODER_URL, "encoder.weights.h5")
+        
+    if not os.path.exists("decoder.weights.h5"):
+        print("Downloading decoder weights...")
+        urllib.request.urlretrieve(DECODER_URL, "decoder.weights.h5")
+
+# Call before loading models
+download_weights_if_missing()
+
+import os
 import numpy as np
 import tensorflow as tf
 from PIL import Image
