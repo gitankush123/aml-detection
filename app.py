@@ -20,9 +20,9 @@ st.write("ConvVAE reconstruction paired with Hyperdimensional Computing (HDC) bi
 IMG_SIZE   = 160
 LATENT_DIM = 64
 HV_DIM     = 10000
-GRID_SIZE  = 16
+GRID_SIZE  = 16       # Matched to 8x8 spatial grid from optimal notebook runs
 PATCH_FEAT = 4
-THRESHOLD  = 0.597  # Recalibrated threshold range [0.35 - 0.50]
+THRESHOLD  = 0.597   # Calibrated ROC optimal threshold
 
 BASE_DIR     = os.path.dirname(os.path.abspath(__file__))
 ENCODER_PATH = os.path.join(BASE_DIR, "encoder.weights.h5")
@@ -32,7 +32,7 @@ PROTO_PATH   = os.path.join(BASE_DIR, "proto_normal.npy")
 ENCODER_URL = "https://github.com/gitankush123/aml-detection/releases/download/v1.0.0/encoder.weights.h5"
 DECODER_URL = "https://github.com/gitankush123/aml-detection/releases/download/v1.0.0/decoder.weights.h5"
 
-# Fixed random state for projection matrices
+# Fixed projection matrices for deterministic hypervector mapping
 np.random.seed(42)
 RP_latent  = np.random.randn(LATENT_DIM, HV_DIM).astype(np.float32)
 RP_heatmap = np.random.randn(PATCH_FEAT, HV_DIM).astype(np.float32)
@@ -98,7 +98,7 @@ encoder, decoder, proto_normal = load_full_pipeline()
 # 3. HDC PIPELINE UTILITIES
 # =============================================================
 def binarize_hv(proj):
-    """Maps projection arrays strictly to {-1.0, 1.0}."""
+    """Maps projection arrays strictly to bipolar values {-1.0, 1.0}."""
     hv = np.sign(proj).astype(np.float32)
     hv[hv == 0] = 1.0
     return hv
@@ -149,7 +149,7 @@ def cosine_similarity(hv1, hv2):
 uploaded_file = st.file_uploader("Upload Blood Cell Image", type=["jpg", "png", "jpeg", "tiff"])
 
 if uploaded_file is not None:
-    # 1. Robust Image Preprocessing
+    # 1. Preprocess Image
     raw_img = Image.open(uploaded_file).convert("RGB")
     img_resized = raw_img.resize((IMG_SIZE, IMG_SIZE))
     img_array = np.array(img_resized, dtype=np.float32) / 255.0
@@ -160,11 +160,11 @@ if uploaded_file is not None:
     recon_img    = decoder.predict(z_mean, verbose=0)[0]
 
     # 3. Dual-Modal HDC Extraction & Fusion
-    hv_lat  = extract_latent_hv(z_mean[0])
-    hv_hm   = extract_heatmap_hv(img_array, recon_img)
+    hv_lat   = extract_latent_hv(z_mean[0])
+    hv_hm    = extract_heatmap_hv(img_array, recon_img)
     hv_fused = fuse_hvs(hv_lat, hv_hm)
 
-    # 4. Anomaly Decision Logic
+    # 4. Anomaly Scoring
     sim = cosine_similarity(hv_fused, proto_normal)
     anomaly_score = 1.0 - sim
     is_aml = anomaly_score > THRESHOLD
@@ -189,7 +189,7 @@ if uploaded_file is not None:
     plt.tight_layout()
     st.pyplot(fig)
 
-    # 6. Diagnosis Outputs
+    # 6. Diagnosis Output
     if is_aml:
         st.error("### Diagnosis: AML DETECTED")
     else:
@@ -197,6 +197,6 @@ if uploaded_file is not None:
 
     st.markdown(f"""
     * **Anomaly Score:** `{anomaly_score:.4f}`
-    * **Decision Threshold:** `{THRESHOLD}`
+    * **ROC Optimal Threshold:** `{THRESHOLD}`
     * **HDC Cosine Similarity:** `{sim:.4f}`
     """)
