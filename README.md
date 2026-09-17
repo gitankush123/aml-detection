@@ -18,3 +18,11 @@ The system processes input images through two parallel pathways:
 ├── proto_normal.npy    # Pre-computed normal prototype hypervector
 ├── requirements.txt    # Python dependencies
 └── README.md           # Project documentation
+Pre-trained Weights
+Download model weights directly from the Release Assets:
+
+Encoder Weights: encoder.weights.h5
+
+Decoder Weights: decoder.weights.h5
+
+Note: Download both .h5 files and place them in the root directory alongside app.py before running the application.
