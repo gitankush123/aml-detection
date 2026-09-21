@@ -185,7 +185,7 @@ def get_hv_final(img_np):
 # =============================================================
 st.title("🔬 AML Blood Cancer Detection")
 st.markdown("""
-**ConvVAE + HDC Unsupervised Anomaly Detection**  
+**ConvVAE + HDC Unsupervised Anomaly Detection by ANKUSH AGARWAL**  
 Trained on healthy cell distribution · **Zero AML labels**
 """)
 
