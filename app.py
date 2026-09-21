@@ -8,7 +8,7 @@ import tensorflow as tf
 from tensorflow.keras import Model, layers
 
 # =============================================================
-# CONFIGURATION — strictly matching Kaggle training
+# PAGE CONFIGURATION
 # =============================================================
 st.set_page_config(
     page_title="AML Anomaly Detection — ConvVAE + HDC",
@@ -16,28 +16,65 @@ st.set_page_config(
     layout="wide",
 )
 
-IMG_SIZE = 160  # ✅ Matches training
-LATENT_DIM = 64  # ✅ Matches training
-HV_DIM = 10000  # ✅ Matches training
-GRID_SIZE = 16  # ✅ Matches training
-PATCH_FEAT = 4  # ✅ Matches training
 
-# Default threshold from Kaggle calibration
+# =============================================================
+# PASSWORD AUTHENTICATION GATEWAY
+# =============================================================
+def check_password():
+  """Returns `True` if the user enters the correct password."""
+
+  def password_entered():
+    """Checks whether the password entered by the user is correct."""
+    if st.session_state.get("password") == st.secrets.get(
+        "password", "default_password"
+    ):
+      st.session_state["password_correct"] = True
+      del st.session_state["password"]  # Don't store password in session state
+    else:
+      st.session_state["password_correct"] = False
+
+  if st.session_state.get("password_correct", False):
+    return True
+
+  # Render Login Form
+  st.title("🔒 Restricted Access")
+  st.subheader("Please enter the password to access this application.")
+
+  st.text_input(
+      "Password", type="password", on_change=password_entered, key="password"
+  )
+
+  if "password_correct" in st.session_state and not st.session_state[
+      "password_correct"
+  ]:
+    st.error("😕 Incorrect password. Please try again.")
+
+  return False
+
+
+if not check_password():
+  st.stop()  # Stop execution until user authenticates
+
+# =============================================================
+# CONFIGURATION — strictly matching Kaggle training
+# =============================================================
+IMG_SIZE = 160
+LATENT_DIM = 64
+HV_DIM = 10000
+GRID_SIZE = 16
+PATCH_FEAT = 4
 THRESHOLD_DEFAULT = 0.5728
-
-# Fixed projection matrices — seed 42 strictly matching Kaggle
-np.random.seed(42)
-RP_latent = np.random.randn(LATENT_DIM, HV_DIM).astype(np.float32)
-RP_heatmap = np.random.randn(PATCH_FEAT, HV_DIM).astype(np.float32)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENCODER_PATH = os.path.join(BASE_DIR, "encoder.weights.h5")
 DECODER_PATH = os.path.join(BASE_DIR, "decoder.weights.h5")
 PROTO_PATH = os.path.join(BASE_DIR, "proto_normal.npy")
+RP_LATENT_PATH = os.path.join(BASE_DIR, "RP_latent.npy")
+RP_HEATMAP_PATH = os.path.join(BASE_DIR, "RP_heatmap.npy")
 
 
 # =============================================================
-# ARCHITECTURE — strictly matching Kaggle build_encoder / build_decoder
+# ARCHITECTURE
 # =============================================================
 class Sampling(layers.Layer):
 
@@ -80,7 +117,7 @@ def build_decoder():
 
 
 # =============================================================
-# LOAD MODELS
+# LOAD MODELS & MATRICES
 # =============================================================
 @st.cache_resource
 def load_pipeline():
@@ -89,13 +126,18 @@ def load_pipeline():
 
   missing = [
       f
-      for f in [ENCODER_PATH, DECODER_PATH, PROTO_PATH]
+      for f in [
+          ENCODER_PATH,
+          DECODER_PATH,
+          PROTO_PATH,
+          RP_LATENT_PATH,
+          RP_HEATMAP_PATH,
+      ]
       if not os.path.exists(f)
   ]
   if missing:
     st.error(
-        f"Missing files: {missing}\nEnsure weight and prototype files exist in"
-        " directory."
+        f"Missing required files: {missing}\nPlease upload them to your repo."
     )
     st.stop()
 
@@ -107,14 +149,18 @@ def load_pipeline():
   proto = np.load(PROTO_PATH).astype(np.float32)
   proto = np.sign(proto)
   proto[proto == 0] = 1.0
-  return enc, dec, proto
+
+  rp_lat = np.load(RP_LATENT_PATH).astype(np.float32)
+  rp_heat = np.load(RP_HEATMAP_PATH).astype(np.float32)
+
+  return enc, dec, proto, rp_lat, rp_heat
 
 
-encoder, decoder, proto_normal = load_pipeline()
+encoder, decoder, proto_normal, RP_latent, RP_heatmap = load_pipeline()
 
 
 # =============================================================
-# HDC PIPELINE — strictly matching Kaggle functions
+# HDC PIPELINE
 # =============================================================
 def encode_to_hv(vec, RP):
   vec = vec / (np.linalg.norm(vec) + 1e-8)
@@ -127,19 +173,18 @@ def encode_to_hv(vec, RP):
 def get_hv_final(img_np):
   inp = tf.constant(img_np[np.newaxis], dtype=tf.float32)
 
-  # Match infer_single logic from Kaggle (using z_mean for deterministic inference)
   z_m, _, _ = encoder(inp, training=False)
   recon = decoder(z_m, training=False)
 
   z_np = z_m.numpy()[0]
   recon_np = recon.numpy()[0]
 
-  # 1. Global Branch
+  # Global Branch
   hv_lat = encode_to_hv(z_np, RP_latent)
 
-  # 2. Local Branch
+  # Local Branch
   error = (img_np - recon_np) ** 2
-  heatmap = np.sqrt(np.max(error, axis=-1))  # sqrt sharpening
+  heatmap = np.sqrt(np.max(error, axis=-1))
 
   H, W = heatmap.shape
   ph, pw = H // GRID_SIZE, W // GRID_SIZE
@@ -147,7 +192,7 @@ def get_hv_final(img_np):
 
   for r in range(GRID_SIZE):
     for c in range(GRID_SIZE):
-      patch = heatmap[r * ph : (r + 1) * ph, c * pw : (c + 1) * pw]  # Fixed pw indexing
+      patch = heatmap[r * ph : (r + 1) * ph, c * pw : (c + 1) * pw]
       feat = np.array(
           [
               np.mean(patch),
@@ -163,13 +208,12 @@ def get_hv_final(img_np):
   hv_heat = np.sign(accum).astype(np.float32)
   hv_heat[hv_heat == 0] = 1.0
 
-  # 3. Fusion (Bind + Bundle)
+  # Fusion
   bound = hv_lat * hv_heat
   bundled = bound + hv_lat + hv_heat
   hv_fin = np.sign(bundled).astype(np.float32)
   hv_fin[hv_fin == 0] = 1.0
 
-  # Cosine Similarity Calculation
   sim = float(
       np.dot(hv_fin, proto_normal)
       / (np.linalg.norm(hv_fin) * np.linalg.norm(proto_normal) + 1e-8)
@@ -185,11 +229,15 @@ def get_hv_final(img_np):
 # =============================================================
 st.title("🔬 AML Blood Cancer Detection")
 st.markdown("""
-**ConvVAE + HDC Unsupervised Anomaly Detection by ANKUSH AGARWAL**  
+**ConvVAE + HDC Unsupervised Anomaly Detection**  
 Trained on healthy cell distribution · **Zero AML labels**
 """)
 
 st.sidebar.header("Controls")
+if st.sidebar.button("Log Out"):
+  st.session_state["password_correct"] = False
+  st.rerun()
+
 threshold_display = st.sidebar.slider(
     "Cosine Similarity Threshold",
     min_value=0.30,
@@ -198,12 +246,6 @@ threshold_display = st.sidebar.slider(
     step=0.005,
     help="Cosine Similarity < Threshold → ANOMALY",
 )
-
-st.sidebar.markdown(f"""
-**Calibration Benchmarks:**  
-Calibrated Threshold: **{THRESHOLD_DEFAULT:.4f}**  
-*Rule:* `Cosine Similarity < Threshold` indicates **Anomaly (AML)**.
-""")
 
 uploaded = st.sidebar.file_uploader(
     "Upload Blood Cell Image", type=["jpg", "jpeg", "png", "tiff", "tif", "bmp"]
