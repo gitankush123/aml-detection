@@ -105,6 +105,21 @@ def load_pipeline():
 
 encoder, decoder, proto_normal, RP_latent, RP_heatmap = load_pipeline()
 
+st.sidebar.write("Prototype shape:", proto_normal.shape)
+st.sidebar.write("Prototype unique:", np.unique(proto_normal))
+st.sidebar.write("Prototype norm:", np.linalg.norm(proto_normal))
+
+st.sidebar.write("RP_latent first 5:", RP_latent[0, :5])
+st.sidebar.write("RP_heatmap first 5:", RP_heatmap[0, :5])
+st.sidebar.write("Prototype first 10:", proto_normal[:10])
+
+assert proto_normal.shape == (HD_DIM,)
+assert RP_latent.shape == (LATENT_DIM, HD_DIM)
+assert RP_heatmap.shape == (PATCH_FEAT, HD_DIM)
+
+# Debug mode
+debug = st.sidebar.checkbox("Show debug info", value=False)
+
 # =============================================================
 # HDC PIPELINE
 # =============================================================
@@ -127,6 +142,7 @@ def run_pipeline(img_np):
 
     # Global branch
     hv_lat  = encode_to_hv(z_np, RP_latent)
+    sim_latent = cosine_sim(hv_lat, proto_normal)
 
     # Local branch — 16×16 grid
     error   = (img_np - recon_np) ** 2
@@ -145,11 +161,23 @@ def run_pipeline(img_np):
 
     hv_heat = np.sign(accum).astype(np.float32)
     hv_heat[hv_heat == 0] = 1.0
+    sim_heat = cosine_sim(hv_heat, proto_normal)
 
     # Fusion — bind + bundle
     bound   = hv_lat * hv_heat
     hv_fin  = np.sign(bound + hv_lat + hv_heat).astype(np.float32)
     hv_fin[hv_fin == 0] = 1.0
+    sim_final = cosine_sim(hv_fin, proto_normal)
+
+    if debug:
+        st.write({
+            "latent_similarity": sim_latent,
+            "heatmap_similarity": sim_heat,
+            "final_similarity": sim_final,
+            "latent_hv_unique": np.unique(hv_lat),
+            "heat_hv_unique": np.unique(hv_heat),
+            "final_hv_unique": np.unique(hv_fin),
+        })
 
     sim = float(np.clip(cosine_sim(hv_fin, proto_normal), -1.0, 1.0))
     mse = float(np.mean((img_np - recon_np) ** 2))
@@ -179,9 +207,6 @@ st.sidebar.markdown(f"""
 - AML blast cells: sim ≈ **0.50 – 0.54**
 - Current threshold: **{threshold:.4f}**
 """)
-
-# Debug mode
-debug = st.sidebar.checkbox("Show debug info", value=False)
 
 uploaded = st.sidebar.file_uploader(
     "Upload Blood Cell Image",
